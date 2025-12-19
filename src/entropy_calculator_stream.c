@@ -6,7 +6,7 @@
 #include <assert.h>
 
 #define MIN_WINDOW_SIZE 16
-#define MAX_WINDOW_SIZE 4096
+#define MAX_WINDOW_SIZE 1024
 #define DEFAULT_BUFFER_SIZE (1024 * 1024) // 1 MB buffer
 
 // Structure for temporary computation data
@@ -330,7 +330,7 @@ size_t* auto_window_sizes(size_t file_size, size_t *num_sizes) {
     if (max_window > MAX_WINDOW_SIZE) max_window = MAX_WINDOW_SIZE;
     if (max_window < MIN_WINDOW_SIZE) max_window = MIN_WINDOW_SIZE;
 
-    size_t capacity = 16;
+    size_t capacity = 8;
     size_t *sizes = (size_t*)malloc(capacity * sizeof(size_t));
     *num_sizes = 0;
 

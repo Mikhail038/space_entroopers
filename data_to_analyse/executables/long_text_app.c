@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *extremelyLongPassword =
+const char *extremelyLongText =
     "665b16ac8915f746bc43c9572b4581a5e904721677c86cb5db8960d224f2a866120893e61d62f5e85bd9c58c5cd142277754b11d"
     "ee805799ed2528b1828d20eeb4d5e8a3654d3f8bdda6266a1f50c31c859f18ce25559dc02f5297775a87b017c6b88edfc9666dc8"
     "5de0aa360ed11597b74dd75f8a25cbdf74e52ba4de25eb5f03824d65087750636d795641be061536ed9a426b220562dbaaaf8ce7"
@@ -131,7 +131,7 @@ int main() {
     printf("Enter your password: ");
     fgets(password, sizeof(password), stdin);
 
-    if (strcmp(password, extremelyLongPassword) == 0) {
+    if (strcmp(password, extremelyLongText) == 0) {
         printf("You pass!\n");
     } else {
         printf("WROOOONG!\n");
