@@ -345,7 +345,7 @@ size_t* auto_window_sizes(size_t file_size, size_t *num_sizes) {
         }
 
         sizes[(*num_sizes)++] = window;
-        window = (size_t)(window * 1.5);
+        window = (size_t)(window * 2);
     }
 
     return sizes;
