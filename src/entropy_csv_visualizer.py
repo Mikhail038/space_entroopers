@@ -1,4 +1,4 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 
 import pandas as pd
 import numpy as np
@@ -11,69 +11,92 @@ from pathlib import Path
 import warnings
 from scipy.ndimage import label
 import json
+from scipy.signal import find_peaks
 warnings.filterwarnings('ignore')
 
 @dataclass
 class EntropySeries:
-    """Структура для хранения ряда энтропии (новый формат)"""
+    """Структура для хранения ряда энтропии с улучшенной фильтрацией"""
     window_size: int
     step: int
     offsets: np.ndarray
-    entropy: np.ndarray
     entropy_norm: np.ndarray
+    filtered_value: np.ndarray  # Отфильтрованное значение (со знаком)
+    filtered_abs: np.ndarray    # Абсолютное значение (сила скачка)
     filename: str = ""
 
     def __post_init__(self):
-        # Конвертируем в numpy массивы если нужно
         if not isinstance(self.offsets, np.ndarray):
             self.offsets = np.array(self.offsets)
-        if not isinstance(self.entropy, np.ndarray):
-            self.entropy = np.array(self.entropy)
         if not isinstance(self.entropy_norm, np.ndarray):
             self.entropy_norm = np.array(self.entropy_norm)
+        if not isinstance(self.filtered_value, np.ndarray):
+            self.filtered_value = np.array(self.filtered_value)
+        if not isinstance(self.filtered_abs, np.ndarray):
+            self.filtered_abs = np.array(self.filtered_abs)
 
-        # Ограничиваем значения [0, 1]
         self.entropy_norm = np.clip(self.entropy_norm, 0.0, 1.0)
-
-        # Вычисляем производную (для поиска скачков)
+        
+        # Вычисляем производные
         if len(self.entropy_norm) > 1:
             self.gradient = np.gradient(self.entropy_norm)
+            # Вторая производная для лучшего выделения границ
+            self.second_derivative = np.gradient(self.gradient)
+            
+            # Находим пики в отфильтрованном сигнале
+            self._find_peaks()
         else:
             self.gradient = np.array([])
+            self.second_derivative = np.array([])
+            self.peaks = np.array([], dtype=bool)
+            self.peak_values = np.array([])
+    
+    def _find_peaks(self, prominence: float = 0.1):
+        """Находит пики в отфильтрованном сигнале"""
+        if len(self.filtered_abs) < 3:
+            self.peaks = np.zeros(len(self.filtered_abs), dtype=bool)
+            self.peak_values = np.array([])
+            self.peak_positions = np.array([])
+            return
+        
+        try:
+            # Ищем пики в абсолютном значении
+            peaks, properties = find_peaks(self.filtered_abs, 
+                                          prominence=prominence,
+                                          distance=max(1, self.window_size // self.step))
+            
+            self.peaks = np.zeros(len(self.filtered_abs), dtype=bool)
+            self.peaks[peaks] = True
+            self.peak_values = self.filtered_abs[peaks]
+            self.peak_positions = self.offsets[peaks]
+        except:
+            # Если find_peaks не сработал, используем простой метод
+            self.peaks = np.zeros(len(self.filtered_abs), dtype=bool)
+            self.peak_values = np.array([])
+            self.peak_positions = np.array([])
 
 class CSVEntropyAnalyzer:
-    """Анализатор, работающий с CSV файлами нового формата"""
-
     @staticmethod
     def load_from_csv(csv_file: Union[str, Path]) -> Dict[int, List[EntropySeries]]:
-        """
-        Загружает результаты анализа из CSV файла (новый формат)
-
-        Args:
-            csv_file: Путь к CSV файлу с результатами
-
-        Returns:
-            Словарь: {размер_окна: [список EntropySeries]}
-        """
         csv_path = Path(csv_file)
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV файл не найден: {csv_file}")
 
         print(f"Загрузка данных из CSV: {csv_path}")
 
-        # Читаем CSV файл
-        df = pd.read_csv(csv_path)
+        try:
+            df = pd.read_csv(csv_file)
+        except Exception as e:
+            raise ValueError(f"Ошибка чтения CSV файла: {e}")
 
         print(f"Загружено {len(df)} записей")
 
-        # Проверяем наличие необходимых колонок (новый формат)
-        required_columns = ['window_size', 'step', 'offset', 'entropy', 'entropy_norm']
+        required_columns = ['window_size', 'step', 'offset', 'entropy_norm', 'filtered_value', 'filtered_abs']
         for col in required_columns:
             if col not in df.columns:
                 raise ValueError(f"Отсутствует обязательная колонка: {col}. "
-                               f"Используйте новый формат: {', '.join(required_columns)}")
+                               f"Найдены колонки: {list(df.columns)}")
 
-        # Группируем результаты
         grouped_results = {}
 
         for (window, step), group in df.groupby(['window_size', 'step']):
@@ -84,30 +107,28 @@ class CSVEntropyAnalyzer:
                 window_size=int(window),
                 step=int(step),
                 offsets=group['offset'].values,
-                entropy=group['entropy'].values,
                 entropy_norm=group['entropy_norm'].values,
+                filtered_value=group['filtered_value'].values,
+                filtered_abs=group['filtered_abs'].values,
                 filename=str(csv_path)
             )
             grouped_results[window].append(series)
 
-        # Сортируем серии внутри каждой группы по шагу (от большего к меньшему)
         for window in grouped_results:
-            grouped_results[window].sort(key=lambda x: x.step, reverse=True)
+            # Сортируем серии по шагу (от меньшего к большему для лучшей детализации)
+            grouped_results[window].sort(key=lambda x: x.step)
 
         print(f"Создано {sum(len(v) for v in grouped_results.values())} рядов энтропии")
+        print(f"Размеры окон: {list(grouped_results.keys())}")
+        
+        for window in grouped_results:
+            steps = [s.step for s in grouped_results[window]]
+            print(f"  Окно {window}: шаги {steps}")
+        
         return grouped_results
 
     @staticmethod
     def compare_multiple_csv(csv_files: List[Union[str, Path]]) -> Dict[str, Dict[int, List[EntropySeries]]]:
-        """
-        Загружает и сравнивает несколько CSV файлов
-
-        Args:
-            csv_files: Список путей к CSV файлам
-
-        Returns:
-            Словарь: {имя_файла: результаты}
-        """
         results = {}
         for csv_file in csv_files:
             name = Path(csv_file).stem
@@ -115,649 +136,370 @@ class CSVEntropyAnalyzer:
 
         return results
 
-class EntropyVisualizer:
-    """Универсальный визуализатор энтропии для нового формата CSV"""
-
+class EnhancedEntropyVisualizer:
     def __init__(self, results: Union[Dict[int, List[EntropySeries]],
                                       Dict[str, Dict[int, List[EntropySeries]]]]):
-        """
-        Args:
-            results: Может быть либо словарем результатов одного файла,
-                    либо словарем сравнения нескольких файлов
-        """
         self.results = results
         self.is_comparison = isinstance(next(iter(results.values())), dict)
         self.colors = plt.cm.tab10.colors
-
-    def plot_single_file(self,
-                        save_path: Optional[str] = None,
-                        figsize: Tuple[int, int] = (16, 10),
-                        show_jumps: bool = True,
-                        jump_threshold: float = 0.3) -> plt.Figure:
+    
+    def _get_best_series(self, results: Dict[int, List[EntropySeries]]) -> Optional[EntropySeries]:
         """
-        Строит графики для одного файла
-
-        Args:
-            save_path: Путь для сохранения изображения
-            figsize: Размер фигуры
-            show_jumps: Показывать ли скачки энтропии
-            jump_threshold: Порог для обнаружения скачков
-
-        Returns:
-            Объект фигуры matplotlib
+        Находит наилучшую серию для анализа:
+        1. Сначала пробуем наименьшее окно (максимальная детализация)
+        2. Потом выбираем серию с наименьшим шагом
         """
-        if self.is_comparison:
-            raise ValueError("Для сравнения файлов используйте plot_comparison")
-
-        results = self.results
-        num_windows = len(results)
-
-        # Создаем сетку графиков
-        fig, axes = plt.subplots(num_windows, 1, figsize=figsize, sharex=True)
-
-        if num_windows == 1:
-            axes = [axes]
-
-        # Настраиваем отображение для каждого размера окна
-        for ax, (window_size, series_list) in zip(axes, results.items()):
-            # Рисуем каждую серию (шаг) разным цветом
-            for i, series in enumerate(series_list):
-                color = self.colors[i % len(self.colors)]
-
-                # Определяем метку для шага
-                if series.step == 1:
-                    step_label = "шаг=1"
-                elif series.step == window_size // 4:
-                    step_label = "шаг=окно/4"
-                elif series.step == window_size // 2:
-                    step_label = "шаг=окно/2"
-                elif series.step == window_size:
-                    step_label = "шаг=окно"
-                else:
-                    step_label = f"шаг={series.step}"
-
-                # Основная линия нормированной энтропии
-                line = ax.plot(series.offsets, series.entropy_norm,
-                       color=color, alpha=0.7, linewidth=1,
-                       label=f'{step_label}')[0]
-
-                # Показываем скачки энтропии
-                if show_jumps and len(series.gradient) > 0:
-                    jumps = np.where(np.abs(series.gradient) > jump_threshold)[0]
-
-                    if len(jumps) > 0:
-                        # Группируем близкие скачки
-                        clusters = self._cluster_indices(jumps, window_size)
-
-                        for cluster in clusters:
-                            if len(cluster) > 0:
-                                center_idx = cluster[len(cluster)//2]
-                                x_pos = series.offsets[center_idx]
-                                y_pos = series.entropy_norm[center_idx]
-
-                                # Аннотируем скачки
-                                # if i == 0:  # Добавляем легенду только для первой серии
-                                #     # ax.scatter(x_pos, y_pos,
-                                #     #          color='red', s=30, zorder=5,
-                                #     #          marker='x', label='Скачок энтропии')
-                                # else:
-                                ax.scatter(x_pos, y_pos,
-                                            color='red', s=30, zorder=5,
-                                            marker='x')
-
-            # Настраиваем график
-            ax.set_title(f'Размер окна: {window_size} байт', fontsize=11)
-            ax.set_ylabel('Нормированная энтропия', fontsize=10)
-            ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            ax.legend(loc='upper right', fontsize=9)
-
-            # Устанавливаем пределы по Y с отступом от нуля
-            # Собираем все значения нормированной энтропии для всех серий этого окна
-            all_entropy_values = []
-            for series in series_list:
-                all_entropy_values.extend(series.entropy_norm)
-
-            ax.set_ylim(-0.05, 1.05)
-
-            # Добавляем горизонтальную линию на уровне 0 для наглядности
-            ax.axhline(y=0, color='black', linewidth=0.5, alpha=0.3, zorder=1)
-
-            # Подписываем ось X только на последнем графике
-            if ax == axes[-1]:
-                ax.set_xlabel('Смещение в памяти (байты)', fontsize=10)
-
-        # plt.suptitle('Анализ энтропии (нормированная)', fontsize=13, y=0.95)
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-
-        return fig
-
-    def plot_comparison(self,
-                       save_path: Optional[str] = None,
-                       figsize: Tuple[int, int] = (18, 12),
-                       selected_window: Optional[int] = None) -> plt.Figure:
+        if not results:
+            return None
+        
+        # Пробуем найти серию с наименьшим окном
+        smallest_window = min(results.keys())
+        
+        if smallest_window not in results or not results[smallest_window]:
+            # Если нет данных для наименьшего окна, пробуем следующее
+            available_windows = sorted(results.keys())
+            for window in available_windows:
+                if window in results and results[window]:
+                    smallest_window = window
+                    break
+        
+        if smallest_window not in results or not results[smallest_window]:
+            return None
+        
+        # Выбираем серию с наименьшим шагом для лучшей детализации
+        series_list = results[smallest_window]
+        best_series = min(series_list, key=lambda x: x.step)
+        
+        print(f"Выбрана серия: окно={best_series.window_size}, шаг={best_series.step}, "
+              f"точек={len(best_series.offsets)}")
+        
+        return best_series
+    
+    def plot_simple_detection(self,
+                              save_path: Optional[str] = None,
+                              figsize: Tuple[int, int] = (20, 8),
+                              threshold_factor: float = 0.5,
+                              show_details: bool = True) -> Optional[plt.Figure]:
         """
-        Сравнивает энтропию нескольких файлов
-
+        Упрощенная визуализация: только энтропия и логарифмированная сила скачков
+        
         Args:
             save_path: Путь для сохранения
             figsize: Размер фигуры
-            selected_window: Конкретный размер окна для сравнения
-
-        Returns:
-            Объект фигуры matplotlib
+            threshold_factor: Коэффициент для определения порога (относительно максимума)
+            show_details: Показывать детальную информацию о скачках
         """
-        if not self.is_comparison:
-            raise ValueError("Для сравнения нужны данные нескольких файлов")
-
-        # Выбираем общие размеры окон
-        all_windows = set()
-        for file_results in self.results.values():
-            all_windows.update(file_results.keys())
-
-        if selected_window is not None:
-            windows_to_plot = [selected_window] if selected_window in all_windows else list(all_windows)[:1]
+        if self.is_comparison:
+            print("Внимание: функция plot_simple_detection работает только с одним файлом")
+            return None
+        
+        results = self.results
+        if not results:
+            print("Нет данных для визуализации")
+            return None
+        
+        # Находим наилучшую серию для анализа
+        target_series = self._get_best_series(results)
+        if target_series is None:
+            print("Не удалось найти подходящую серию данных")
+            return None
+        
+        # Автоматически определяем порог
+        if len(target_series.filtered_abs) > 0:
+            max_filtered = np.max(target_series.filtered_abs)
+            threshold = max_filtered * threshold_factor
         else:
-            windows_to_plot = sorted(all_windows)[:4]  # Ограничиваем 4 окнами
-
-        num_windows = len(windows_to_plot)
-
-        # Создаем сетку графиков
-        fig, axes = plt.subplots(num_windows, 1, figsize=figsize, sharex=True)
-
-        if num_windows == 1:
-            axes = [axes]
-
-        # Для каждого окна строим сравнение файлов
-        for ax, window_size in zip(axes, windows_to_plot):
-            # Собираем все данные для вычисления общего диапазона Y
-            all_entropy_values = []
-
-            for i, (file_name, file_results) in enumerate(self.results.items()):
-                if window_size in file_results:
-                    series_list = file_results[window_size]
-
-                    # Ищем серию с шагом window/4 (оптимальную)
-                    target_series = None
-                    for series in series_list:
-                        if series.step == max(1, window_size // 4):
-                            target_series = series
-                            break
-
-                    if target_series is None:
-                        continue
-
-                    color = self.colors[i % len(self.colors)]
-
-                    # Рисуем нормированную энтропию
-                    line = ax.plot(target_series.offsets, target_series.entropy_norm,
-                           color=color, alpha=0.7, linewidth=1,
-                           label=file_name)[0]
-
-                    # Собираем значения энтропии для вычисления диапазона
-                    all_entropy_values.extend(target_series.entropy_norm)
-
-            ax.set_title(f'Сравнение файлов (окно: {window_size} байт)', fontsize=11)
-            ax.set_ylabel('Нормированная энтропия', fontsize=10)
-            ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            ax.legend(loc='upper right', fontsize=9)
-
-            ax.set_ylim(-0.05, 1.05)
-
-            # Добавляем горизонтальную линию на уровне 0
-            ax.axhline(y=0, color='black', linewidth=0.5, alpha=0.3)
-
-        axes[-1].set_xlabel('Смещение в памяти (байты)', fontsize=10)
-        plt.suptitle('Сравнение нормированной энтропии', fontsize=13, y=0.95)
+            threshold = 0.1
+        
+        print(f"\nАнализ серии:")
+        print(f"  Размер окна: {target_series.window_size}")
+        print(f"  Шаг: {target_series.step}")
+        print(f"  Количество точек: {len(target_series.offsets)}")
+        print(f"  Максимальное значение фильтра: {max_filtered:.3f}")
+        print(f"  Порог обнаружения: {threshold:.3f}")
+        
+        # Находим пики выше порога
+        strong_peaks = target_series.filtered_abs > threshold
+        peak_indices = np.where(strong_peaks)[0]
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True, 
+                                       gridspec_kw={'height_ratios': [2, 1]})
+        
+        # 1. График энтропии
+        ax1.plot(target_series.offsets, target_series.entropy_norm,
+                color='blue', alpha=0.8, linewidth=1.5,
+                label=f'Нормированная энтропия (окно={target_series.window_size}, шаг={target_series.step})')
+        
+        # Выделяем области с сильными скачками
+        for idx in peak_indices:
+            if idx < len(target_series.offsets):
+                x_pos = target_series.offsets[idx]
+                y_pos = target_series.entropy_norm[idx]
+                
+                # Определяем цвет в зависимости от направления
+                direction = target_series.filtered_value[idx]
+                color = 'green' if direction > 0 else 'red'
+                
+                ax1.axvline(x=x_pos, color=color, alpha=0.4, linestyle='--', linewidth=0.8)
+                
+                # Подписываем только очень сильные скачки
+                if target_series.filtered_abs[idx] > threshold * 2:
+                    ax1.annotate(f'↑{target_series.filtered_abs[idx]:.2f}' if direction > 0 
+                                else f'↓{target_series.filtered_abs[idx]:.2f}',
+                                xy=(x_pos, y_pos),
+                                xytext=(5, 10),
+                                textcoords='offset points',
+                                fontsize=8,
+                                bbox=dict(boxstyle='round,pad=0.2', facecolor=color, alpha=0.3))
+        
+        ax1.set_title('Нормированная энтропия с обнаруженными скачками', fontsize=12)
+        ax1.set_ylabel('Энтропия', fontsize=10)
+        ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax1.legend(loc='upper right', fontsize=9)
+        ax1.set_ylim(-0.05, 1.05)
+        
+        # 2. Логарифмированный график силы скачков
+        if np.any(target_series.filtered_abs > 0):
+            # Избегаем log(0)
+            log_filtered = np.log1p(target_series.filtered_abs * 10)
+            ax2.plot(target_series.offsets, log_filtered,
+                    color='brown', alpha=0.8, linewidth=1.5,
+                    label='log(1 + 10×сила)')
+            
+            # Порог в логарифмированной шкале
+            log_threshold = np.log1p(threshold * 10)
+            ax2.axhline(y=log_threshold, color='darkred', linestyle='--',
+                       linewidth=1.5, alpha=0.7, label=f'Порог ({log_threshold:.2f})')
+            
+            # Закрашиваем области выше порога
+            above_threshold = target_series.filtered_abs > threshold
+            if np.any(above_threshold):
+                # Находим непрерывные области
+                regions = self._find_contiguous_regions(above_threshold)
+                
+                for start_idx, end_idx in regions:
+                    if start_idx < len(target_series.offsets) and end_idx < len(target_series.offsets):
+                        start_x = target_series.offsets[start_idx]
+                        end_x = target_series.offsets[end_idx]
+                        
+                        ax2.fill_betweenx(y=[0, np.max(log_filtered) * 1.1],
+                                         x1=start_x, x2=end_x,
+                                         color='red', alpha=0.2)
+        else:
+            ax2.plot(target_series.offsets, target_series.filtered_abs,
+                    color='brown', alpha=0.8, linewidth=1.5,
+                    label='Сила скачка')
+            ax2.axhline(y=threshold, color='darkred', linestyle='--',
+                       linewidth=1.5, alpha=0.7, label=f'Порог ({threshold:.2f})')
+        
+        ax2.set_title('Логарифмированная сила скачков (усилены большие изменения)', fontsize=12)
+        ax2.set_ylabel('log(сила)', fontsize=10)
+        ax2.set_xlabel('Смещение в памяти (байты)', fontsize=10)
+        ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax2.legend(loc='upper right', fontsize=9)
+        
         plt.tight_layout()
-
+        
+        # Выводим статистику по найденным скачкам
+        if show_details and len(peak_indices) > 0:
+            self._print_peak_statistics(target_series, peak_indices, threshold)
+        
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-
+        
         return fig
-
-    def detect_anomalies(self,
-                        entropy_threshold: float = 0.9,
-                        gradient_threshold: float = 0.3,
-                        min_size: int = 32) -> List[Dict]:
-        """
-        Обнаружение аномалий в данных
-
-        Args:
-            entropy_threshold: Порог высокой энтропии (0-1)
-            gradient_threshold: Порог для скачков энтропии
-            min_size: Минимальный размер аномалии в байтах
-
-        Returns:
-            Список обнаруженных аномалий
-        """
-        anomalies = []
-
-        # Для случая сравнения файлов анализируем каждый файл отдельно
-        if self.is_comparison:
-            for file_name, results in self.results.items():
-                file_anomalies = self._analyze_single_file(results, entropy_threshold,
-                                                         gradient_threshold, min_size)
-                for anomaly in file_anomalies:
-                    anomaly['file'] = file_name
-                    anomalies.append(anomaly)
-        else:
-            anomalies = self._analyze_single_file(self.results, entropy_threshold,
-                                                gradient_threshold, min_size)
-
-        return anomalies
-
-    def _analyze_single_file(self, results, entropy_threshold,
-                           gradient_threshold, min_size) -> List[Dict]:
-        """Анализ одного файла"""
-        anomalies = []
-
-        # Используем самое маленькое окно для максимальной детализации
-        if not results:
-            return anomalies
-
-        smallest_window = min(results.keys())
-
-        for window_size, series_list in results.items():
-            if window_size != smallest_window:
-                continue
-
-            for series in series_list:
-                # Используем серию с оптимальным шагом (window/4)
-                if series.step == max(1, window_size // 4):
-                    # 1. Обнаружение регионов с высокой энтропией
-                    high_entropy_regions = self._find_high_entropy_regions(
-                        series, entropy_threshold, min_size
-                    )
-
-                    # 2. Обнаружение скачков энтропии
-                    jumps = self._find_entropy_jumps(
-                        series, gradient_threshold
-                    )
-
-                    # 3. Обнаружение низкой энтропии
-                    low_entropy_regions = self._find_low_entropy_regions(
-                        series, 0.3, min_size
-                    )
-
-                    # Объединяем все аномалии
-                    for region in high_entropy_regions:
-                        region['type'] = 'high_entropy'
-                        region['window_size'] = window_size
-                        region['step'] = series.step
-                        anomalies.append(region)
-
-                    for jump in jumps:
-                        jump['type'] = 'entropy_jump'
-                        jump['window_size'] = window_size
-                        jump['step'] = series.step
-                        anomalies.append(jump)
-
-                    for region in low_entropy_regions:
-                        region['type'] = 'low_entropy'
-                        region['window_size'] = window_size
-                        region['step'] = series.step
-                        anomalies.append(region)
-
-                    break  # Используем только первую подходящую серию
-
-        return anomalies
-
-    def _find_high_entropy_regions(self, series, threshold, min_size):
-        """Находит регионы с высокой энтропией"""
+    
+    def _find_contiguous_regions(self, mask: np.ndarray) -> List[Tuple[int, int]]:
+        """Находит непрерывные регионы в булевом массиве"""
         regions = []
-        high_entropy = series.entropy_norm > threshold
-
-        if not np.any(high_entropy):
-            return regions
-
-        # Группируем последовательные точки
-        labeled_array, num_features = label(high_entropy)
-
-        for i in range(1, num_features + 1):
-            indices = np.where(labeled_array == i)[0]
-
-            if len(indices) > 0:
-                start_idx = indices[0]
-                end_idx = indices[-1]
-
-                start_offset = series.offsets[start_idx]
-                end_offset = series.offsets[end_idx] + series.window_size
-                region_size = end_offset - start_offset
-
-                if region_size >= min_size:
-                    region = {
-                        'start': start_offset,
-                        'end': end_offset,
-                        'size': region_size,
-                        'avg_entropy': np.mean(series.entropy_norm[indices]),
-                        'max_entropy': np.max(series.entropy_norm[indices])
-                    }
-                    regions.append(region)
-
+        start = None
+        
+        for i, value in enumerate(mask):
+            if value and start is None:
+                start = i
+            elif not value and start is not None:
+                regions.append((start, i-1))
+                start = None
+        
+        if start is not None:
+            regions.append((start, len(mask)-1))
+        
         return regions
-
-    def _find_entropy_jumps(self, series, threshold):
-        """Находит скачки энтропии"""
-        jumps = []
-
-        if len(series.gradient) == 0:
-            return jumps
-
-        # Находим точки где градиент превышает порог
-        jump_indices = np.where(np.abs(series.gradient) > threshold)[0]
-
-        # Группируем близкие скачки
-        clusters = self._cluster_indices(jump_indices, series.window_size)
-
-        for cluster in clusters:
-            if len(cluster) > 0:
-                center_idx = cluster[len(cluster)//2]
-                jump = {
-                    'position': series.offsets[center_idx],
-                    'gradient': series.gradient[center_idx],
-                    'entropy_before': series.entropy_norm[center_idx-1] if center_idx > 0 else 0,
-                    'entropy_after': series.entropy_norm[center_idx] if center_idx < len(series.entropy_norm) else 0
-                }
-                jumps.append(jump)
-
-        return jumps
-
-    def _find_low_entropy_regions(self, series, threshold, min_size):
-        """Находит регионы с низкой энтропией"""
-        regions = []
-        low_entropy = series.entropy_norm < threshold
-
-        if not np.any(low_entropy):
-            return regions
-
-        # Группируем последовательные точки
-        labeled_array, num_features = label(low_entropy)
-
-        for i in range(1, num_features + 1):
-            indices = np.where(labeled_array == i)[0]
-
-            if len(indices) > 0:
-                start_idx = indices[0]
-                end_idx = indices[-1]
-
-                start_offset = series.offsets[start_idx]
-                end_offset = series.offsets[end_idx] + series.window_size
-                region_size = end_offset - start_offset
-
-                if region_size >= min_size:
-                    region = {
-                        'start': start_offset,
-                        'end': end_offset,
-                        'size': region_size,
-                        'avg_entropy': np.mean(series.entropy_norm[indices]),
-                        'min_entropy': np.min(series.entropy_norm[indices])
-                    }
-                    regions.append(region)
-
-        return regions
-
-    def _cluster_indices(self, indices, window_size):
-        """Группирует близко расположенные индексы"""
-        if len(indices) == 0:
-            return []
-
-        clusters = []
-        current_cluster = [indices[0]]
-
-        for idx in indices[1:]:
-            if idx - current_cluster[-1] <= window_size:
-                current_cluster.append(idx)
+    
+    def _print_peak_statistics(self, series, peak_indices, threshold):
+        """Выводит статистику по найденным пикам"""
+        print(f"\n{'='*80}")
+        print("СТАТИСТИКА ОБНАРУЖЕННЫХ СКАЧКОВ ЭНТРОПИИ")
+        print(f"{'='*80}")
+        print(f"Всего найдено скачков выше порога {threshold:.3f}: {len(peak_indices)}")
+        print(f"{'='*80}")
+        
+        if len(peak_indices) == 0:
+            return
+        
+        # Сортируем пики по силе
+        peak_strengths = series.filtered_abs[peak_indices]
+        sorted_indices = np.argsort(peak_strengths)[::-1]
+        
+        print(f"{'№':<3} {'Смещение':<12} {'Сила':<10} {'Направление':<12} "
+              f"{'Энтропия':<10} {'Δ энтропии':<12}")
+        print(f"{'-'*80}")
+        
+        for i, idx in enumerate(sorted_indices[:20]):  # Показываем топ-20
+            peak_idx = peak_indices[idx]
+            
+            # Определяем направление
+            direction = series.filtered_value[peak_idx]
+            direction_str = "↑ ВВЕРХ" if direction > 0 else "↓ ВНИЗ"
+            
+            # Энтропия в точке скачка
+            current_entropy = series.entropy_norm[peak_idx]
+            
+            # Дельта энтропии (разница с предыдущей точкой)
+            if peak_idx > 0:
+                delta_entropy = series.entropy_norm[peak_idx] - series.entropy_norm[peak_idx-1]
             else:
-                clusters.append(current_cluster)
-                current_cluster = [idx]
-
-        clusters.append(current_cluster)
-        return clusters
-
-    def generate_report(self,
-                       output_dir: Union[str, Path] = "./entropy_report",
-                       export_csv: bool = True) -> Dict:
-        """
-        Генерирует полный отчет об анализе
-
-        Args:
-            output_dir: Директория для сохранения отчета
-            export_csv: Экспортировать ли аномалии в CSV
-
-        Returns:
-            Словарь с результатами анализа
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(exist_ok=True, parents=True)
-
-        # Обнаруживаем аномалии
-        anomalies = self.detect_anomalies()
-
-        # Создаем базовый отчет
-        if self.is_comparison:
-            report = {
-                'analysis_type': 'comparison',
-                'files': list(self.results.keys()),
-                'total_anomalies': len(anomalies),
-                'anomalies': anomalies,
-                'analysis_timestamp': pd.Timestamp.now().isoformat()
-            }
-        else:
-            # Получаем информацию из первого ряда
-            first_series = next(iter(next(iter(self.results.values()))))
-            report = {
-                'analysis_type': 'single_file',
-                'source_file': first_series.filename,
-                'window_sizes': list(self.results.keys()),
-                'total_anomalies': len(anomalies),
-                'anomalies': anomalies,
-                'analysis_timestamp': pd.Timestamp.now().isoformat()
-            }
-
-        # Экспортируем аномалии в CSV
-        if export_csv and anomalies:
-            anomalies_df = pd.DataFrame(anomalies)
-
-            # Добавляем информацию о файле для сравнения
-            if self.is_comparison and 'file' in anomalies_df.columns:
-                anomalies_df = anomalies_df[['file', 'type', 'start', 'end', 'size',
-                                           'avg_entropy', 'max_entropy', 'gradient']]
-
-            csv_path = output_dir / "anomalies.csv"
-            anomalies_df.to_csv(csv_path, index=False, encoding='utf-8')
-            report['anomalies_csv'] = str(csv_path)
-
-        # Сохраняем отчет в JSON
-        json_path = output_dir / "report.json"
-
-        def convert_numpy(obj):
-            if isinstance(obj, (np.integer, np.floating)):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, pd.Timestamp):
-                return obj.isoformat()
-            return obj
-
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, default=convert_numpy)
-
-        # Генерируем графики (ТОЛЬКО ОСНОВНЫЕ, без тепловой карты)
-        plot_path = output_dir / "entropy_analysis.png"
-
-        if self.is_comparison:
-            self.plot_comparison(save_path=str(plot_path))
-        else:
-            self.plot_single_file(save_path=str(plot_path))
-
-        report['main_plot'] = str(plot_path)
-        report['json_report'] = str(json_path)
-
-        # Выводим сводку
-        self._print_summary(report, output_dir)
-
-        return report
-
-    def _print_summary(self, report, output_dir):
-        """Выводит сводку отчета"""
-        print(f"\n{'='*60}")
-        print("ОТЧЕТ АНАЛИЗА ЭНТРОПИИ (НОРМИРОВАННОЙ)")
-        print(f"{'='*60}")
-
-        if report['analysis_type'] == 'comparison':
-            print(f"Сравнение {len(report['files'])} файлов:")
-            for file in report['files']:
-                print(f"  - {file}")
-        else:
-            print(f"Файл: {report.get('source_file', 'Неизвестно')}")
-            print(f"Размеры окон: {report.get('window_sizes', [])}")
-
-        print(f"\nОбнаружено аномалий: {report['total_anomalies']}")
-
-        if report['total_anomalies'] > 0:
-            # Группируем аномалии по типу
-            anomalies = report['anomalies']
-            type_counts = {}
-            for anomaly in anomalies:
-                a_type = anomaly.get('type', 'unknown')
-                type_counts[a_type] = type_counts.get(a_type, 0) + 1
-
-            print("По типам:")
-            for a_type, count in type_counts.items():
-                print(f"  - {a_type}: {count}")
-
-            # Показываем самые крупные аномалии высокой энтропии
-            high_entropy_anomalies = [a for a in anomalies if a.get('type') == 'high_entropy']
-            if high_entropy_anomalies:
-                sorted_by_size = sorted(high_entropy_anomalies,
-                                      key=lambda x: x.get('size', 0),
-                                      reverse=True)[:3]
-                print("\nКрупнейшие регионы высокой энтропии (возможное шифрование):")
-                for i, anomaly in enumerate(sorted_by_size, 1):
-                    print(f"  {i}. Смещение: 0x{anomaly['start']:X}-0x{anomaly['end']:X} "
-                          f"(размер: {anomaly['size']} байт, "
-                          f"энтропия: {anomaly['avg_entropy']:.2f})")
-
-        print(f"\nОтчеты сохранены в: {output_dir}")
-        print(f"{'='*60}")
+                delta_entropy = 0
+            
+            print(f"{i+1:<3} 0x{series.offsets[peak_idx]:08X} "
+                  f"{series.filtered_abs[peak_idx]:<10.3f} "
+                  f"{direction_str:<12} "
+                  f"{current_entropy:<10.3f} "
+                  f"{delta_entropy:<12.3f}")
+        
+        print(f"{'='*80}")
+        
+        # Анализируем направление скачков
+        directions = series.filtered_value[peak_indices]
+        up_count = np.sum(directions > 0)
+        down_count = np.sum(directions < 0)
+        
+        print(f"Направления скачков:")
+        print(f"  Вверх (↑): {up_count} ({up_count/len(peak_indices)*100:.1f}%)")
+        print(f"  Вниз (↓): {down_count} ({down_count/len(peak_indices)*100:.1f}%)")
+        
+        # Находим самые сильные скачки каждого типа
+        if up_count > 0:
+            up_indices = peak_indices[directions > 0]
+            up_strengths = series.filtered_abs[up_indices]
+            strongest_up_idx = up_indices[np.argmax(up_strengths)]
+            print(f"\nСамый сильный скачок ВВЕРХ:")
+            print(f"  Смещение: 0x{series.offsets[strongest_up_idx]:08X}")
+            print(f"  Сила: {series.filtered_abs[strongest_up_idx]:.3f}")
+            print(f"  Энтропия: {series.entropy_norm[strongest_up_idx]:.3f}")
+        
+        if down_count > 0:
+            down_indices = peak_indices[directions < 0]
+            down_strengths = series.filtered_abs[down_indices]
+            strongest_down_idx = down_indices[np.argmax(down_strengths)]
+            print(f"\nСамый сильный скачок ВНИЗ:")
+            print(f"  Смещение: 0x{series.offsets[strongest_down_idx]:08X}")
+            print(f"  Сила: {series.filtered_abs[strongest_down_idx]:.3f}")
+            print(f"  Энтропия: {series.entropy_norm[strongest_down_idx]:.3f}")
+        
+        print(f"{'='*80}")
 
 def main():
-    """Главная функция командной строки"""
     import argparse
-
+    
     parser = argparse.ArgumentParser(
-        description='Визуализатор энтропии из CSV файлов (новый формат)',
+        description='Упрощенный визуализатор энтропии с логарифмической фильтрацией (2 графика)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Формат CSV: window_size,step,offset,entropy,entropy_norm
-
 Примеры:
-  # Анализ одного CSV файла
+  # Базовый анализ
   %(prog)s results.csv
-
-  # Анализ с сохранением отчета
-  %(prog)s results.csv -o ./report/
-
-  # Сравнение нескольких CSV файлов
-  %(prog)s file1.csv file2.csv file3.csv --compare
-
-  # Анализ с настройкой порогов
-  %(prog)s results.csv --threshold 0.95 --min-size 64
-
-  # Только обнаружение аномалий без графиков
-  %(prog)s results.csv --detect-only --export-csv
+  
+  # Анализ с настройкой порога
+  %(prog)s results.csv --threshold 0.3
+  
+  # Анализ без детальной статистики
+  %(prog)s results.csv --no-stats
+  
+  # Анализ с указанием конкретного окна
+  %(prog)s results.csv --window-size 1024
         """
     )
-
-    parser.add_argument('csv_files', nargs='+',
-                       help='CSV файлы с результатами энтропийного анализа')
+    
+    parser.add_argument('csv_file', help='CSV файл с результатами энтропийного анализа')
     parser.add_argument('-o', '--output', default='./entropy_report',
                        help='Директория для сохранения отчета')
-    parser.add_argument('--compare', action='store_true',
-                       help='Сравнить несколько CSV файлов')
-    parser.add_argument('--threshold', type=float, default=0.9,
-                       help='Порог высокой энтропии (0-1)')
-    parser.add_argument('--jump-threshold', type=float, default=0.3,
-                       help='Порог для скачков энтропии')
-    parser.add_argument('--min-size', type=int, default=32,
-                       help='Минимальный размер аномалии (байты)')
-    parser.add_argument('--detect-only', action='store_true',
-                       help='Только обнаружение аномалий без графиков')
-    parser.add_argument('--export-csv', action='store_true',
-                       help='Экспортировать аномалии в CSV')
-    parser.add_argument('--window', type=int,
-                       help='Конкретный размер окна для анализа')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                       help='Коэффициент порога (относительно максимума, 0-1)')
+    parser.add_argument('--window-size', type=int, default=None,
+                       help='Конкретный размер окна для анализа (если не указан, берется наименьшее)')
+    parser.add_argument('--step', type=int, default=None,
+                       help='Конкретный шаг для анализа (если не указан, берется наименьший)')
+    parser.add_argument('--no-stats', action='store_true',
+                       help='Не показывать детальную статистику')
     parser.add_argument('--no-gui', action='store_true',
                        help='Не показывать графики (только сохранять)')
-
+    parser.add_argument('--simple', action='store_true', default=True,
+                       help='Использовать упрощенный режим с 2 графиками (по умолчанию)')
+    
     args = parser.parse_args()
-
+    
     try:
-        # Загружаем данные из CSV (новый формат)
-        if len(args.csv_files) == 1 and not args.compare:
-            # Один файл
-            print(f"Анализ файла: {args.csv_files[0]}")
-            results = CSVEntropyAnalyzer.load_from_csv(args.csv_files[0])
-            visualizer = EntropyVisualizer(results)
-        else:
-            # Несколько файлов для сравнения
-            print(f"Сравнение {len(args.csv_files)} файлов...")
-            results = CSVEntropyAnalyzer.compare_multiple_csv(args.csv_files)
-            visualizer = EntropyVisualizer(results)
-
-        # Обнаружение аномалий
-        anomalies = visualizer.detect_anomalies(
-            entropy_threshold=args.threshold,
-            gradient_threshold=args.jump_threshold,
-            min_size=args.min_size
+        print(f"Анализ файла: {args.csv_file}")
+        results = CSVEntropyAnalyzer.load_from_csv(args.csv_file)
+        
+        # Если указан конкретный размер окна
+        if args.window_size is not None:
+            if args.window_size not in results:
+                print(f"Внимание: размер окна {args.window_size} не найден в данных.")
+                print(f"Доступные размеры окон: {list(results.keys())}")
+                # Используем наименьшее доступное окно
+                args.window_size = min(results.keys())
+                print(f"Будет использовано окно: {args.window_size}")
+        
+        visualizer = EnhancedEntropyVisualizer(results)
+        
+        # Создаем директорию для отчета
+        output_dir = Path(args.output)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Генерируем упрощенную визуализацию (2 графика)
+        plot_path = output_dir / "simple_entropy_analysis.png"
+        print("\nГенерация упрощенной визуализации (2 графика)...")
+        
+        fig = visualizer.plot_simple_detection(
+            save_path=str(plot_path),
+            threshold_factor=args.threshold,
+            show_details=not args.no_stats
         )
-
-        print(f"Обнаружено аномалий: {len(anomalies)}")
-
-        if args.detect_only:
-            # Только обнаружение, без графиков
-            if anomalies:
-                print("\nОбнаруженные аномалии:")
-                for i, anomaly in enumerate(anomalies, 1):
-                    print(f"\n{i}. Тип: {anomaly.get('type', 'unknown')}")
-                    if 'start' in anomaly:
-                        print(f"   Смещение: 0x{anomaly['start']:X}-0x{anomaly['end']:X}")
-                        print(f"   Размер: {anomaly['size']} байт")
-                    if 'position' in anomaly:
-                        print(f"   Позиция: 0x{anomaly['position']:X}")
-                    if 'avg_entropy' in anomaly:
-                        print(f"   Средняя энтропия: {anomaly['avg_entropy']:.3f}")
-
-            # Экспорт в CSV если нужно
-            if args.export_csv and anomalies:
-                output_dir = Path(args.output)
-                output_dir.mkdir(exist_ok=True, parents=True)
-
-                anomalies_df = pd.DataFrame(anomalies)
-                csv_path = output_dir / "detected_anomalies.csv"
-                anomalies_df.to_csv(csv_path, index=False, encoding='utf-8')
-                print(f"\nАномалии сохранены в: {csv_path}")
-
-            return 0
-
-        # Полный отчет с графиками
-        report = visualizer.generate_report(
-            output_dir=args.output,
-            export_csv=args.export_csv
-        )
-
+        
+        if fig is None:
+            print("Не удалось создать график")
+            return 1
+        
+        print(f"Графики сохранены: {plot_path}")
+        
+        # Сохраняем информацию о выбранных параметрах
+        info_path = output_dir / "analysis_info.txt"
+        with open(info_path, 'w', encoding='utf-8') as f:
+            f.write(f"Анализ файла: {args.csv_file}\n")
+            f.write(f"Дата анализа: {pd.Timestamp.now()}\n")
+            f.write(f"Коэффициент порога: {args.threshold}\n")
+            f.write(f"Указанный размер окна: {args.window_size}\n")
+            f.write(f"Указанный шаг: {args.step}\n")
+            f.write(f"Режим: упрощенный (2 графика)\n\n")
+            
+            f.write("Доступные данные:\n")
+            for window_size, series_list in results.items():
+                steps = [s.step for s in series_list]
+                f.write(f"  Окно {window_size}: шаги {steps}\n")
+        
+        print(f"Информация об анализе сохранена: {info_path}")
+        
         # Показываем графики если нет флага --no-gui
         if not args.no_gui:
             try:
                 plt.show()
             except:
                 print("\nГрафики сохранены в файлы (нет доступного DISPLAY)")
-
+        
         return 0
-
+        
     except Exception as e:
         print(f"Ошибка: {e}")
         import traceback

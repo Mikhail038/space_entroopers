@@ -1,4 +1,4 @@
-CC = gcc
+CC = g++
 CFLAGS = -O3 -Wall -Wextra -lm #-fsanitize=address -g -DDEBUG
 TARGET = entropy_analyzer
 SOURCES = entropy_calculator_stream.c main_stream.c
