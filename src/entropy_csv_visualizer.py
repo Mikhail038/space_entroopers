@@ -96,28 +96,27 @@ class EntropyVisualizer:
         self.results = results
         self.colors = plt.cm.tab10.colors
 
-    def _get_best_series(self, results: dict) -> Optional[EntropySeries]:
-        if not results:
-            return None
+    def _get_top_series(self, n: int = 3) -> List[EntropySeries]:
+        """Получить n series с наименьшими window_size"""
+        if not self.results:
+            return []
 
-        smallest_window = min(results.keys())
-        if smallest_window not in results or not results[smallest_window]:
-            for window in sorted(results.keys()):
-                if window in results and results[window]:
-                    smallest_window = window
-                    break
+        # Сортируем window_size по возрастанию
+        sorted_windows = sorted(self.results.keys())
 
-        if smallest_window not in results or not results[smallest_window]:
-            return None
+        top_series = []
+        for window in sorted_windows[:n]:
+            if window in self.results and self.results[window]:
+                # Для каждого window берём series с наименьшим step
+                series_list = self.results[window]
+                best_series = min(series_list, key=lambda x: x.step)
+                top_series.append(best_series)
 
-        series_list = results[smallest_window]
-        best_series = min(series_list, key=lambda x: x.step)
-
-        return best_series
+        return top_series
 
     def plot_detection(self,
                       save_path: Optional[str] = None,
-                      figsize: Tuple[int, int] = (20, 8),
+                      figsize: Tuple[int, int] = (20, 12),
                       threshold_factor: float = 0.5,
                       show_stats: bool = True) -> Optional[plt.Figure]:
 
@@ -125,9 +124,13 @@ class EntropyVisualizer:
         if not results:
             return None
 
-        target_series = self._get_best_series(results)
-        if target_series is None:
+        # Получаем три series с наименьшими window_size
+        top_series = self._get_top_series(3)
+        if not top_series:
             return None
+
+        # Первая series (с наименьшим window_size) для графика силы скачков
+        target_series = top_series[0]
 
         if len(target_series.filtered_abs) > 0:
             max_filtered = np.max(target_series.filtered_abs)
@@ -135,33 +138,53 @@ class EntropyVisualizer:
         else:
             threshold = 0.1
 
-        strong_peaks = target_series.filtered_abs > threshold
-        peak_indices = np.where(strong_peaks)[0]
+        # Создаём 4 графика: 3 для энтропии + 1 для силы скачков
+        fig, axes = plt.subplots(4, 1, figsize=figsize, sharex=True,
+                                gridspec_kw={'height_ratios': [1, 1, 1, 1]})
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, sharex=True,
-                                       gridspec_kw={'height_ratios': [2, 1]})
+        # Графики энтропии для трёх наименьших window_size
+        for i, series in enumerate(top_series):
+            ax = axes[i]
 
-        ax1.plot(target_series.offsets, target_series.entropy_norm,
-                color='blue', alpha=0.8, linewidth=1.5)
+            # Рассчитываем порог для этой series
+            if len(series.filtered_abs) > 0:
+                series_max_filtered = np.max(series.filtered_abs)
+                series_threshold = series_max_filtered * threshold_factor
+            else:
+                series_threshold = 0.1
 
-        for idx in peak_indices:
-            if idx < len(target_series.offsets):
-                x_pos = target_series.offsets[idx]
-                direction = target_series.filtered_value[idx]
-                color = 'green' if direction > 0 else 'red'
-                ax1.axvline(x=x_pos, color=color, alpha=0.3, linestyle='--', linewidth=0.6)
+            strong_peaks = series.filtered_abs > series_threshold
+            peak_indices = np.where(strong_peaks)[0]
 
-        ax1.set_ylabel('Энтропия')
-        ax1.grid(True, alpha=0.2)
-        ax1.set_ylim(-0.05, 1.05)
+            # График энтропии
+            ax.plot(series.offsets, series.entropy_norm,
+                   color='blue', alpha=0.8, linewidth=1.5)
+
+            # Отмечаем пики
+            for idx in peak_indices:
+                if idx < len(series.offsets):
+                    x_pos = series.offsets[idx]
+                    direction = series.filtered_value[idx]
+                    color = 'green' if direction > 0 else 'red'
+                    ax.axvline(x=x_pos, color=color, alpha=0.3, linestyle='--', linewidth=0.6)
+
+            ax.set_ylabel(f'Энтропия\n(window={series.window_size})')
+            ax.grid(True, alpha=0.2)
+            ax.set_ylim(-0.05, 1.05)
+
+            # Добавляем заголовок для каждого графика
+            ax.set_title(f'Window Size: {series.window_size}, Step: {series.step}')
+
+        # Четвёртый график: сила скачков для первой series (с наименьшим window_size)
+        ax4 = axes[3]
 
         if np.any(target_series.filtered_abs > 0):
             log_filtered = np.log1p(target_series.filtered_abs * 10)
-            ax2.plot(target_series.offsets, log_filtered,
+            ax4.plot(target_series.offsets, log_filtered,
                     color='brown', alpha=0.8, linewidth=1.5)
 
             log_threshold = np.log1p(threshold * 10)
-            ax2.axhline(y=log_threshold, color='darkred', linestyle='--',
+            ax4.axhline(y=log_threshold, color='darkred', linestyle='--',
                        linewidth=1.2, alpha=0.6)
 
             above_threshold = target_series.filtered_abs > threshold
@@ -171,20 +194,39 @@ class EntropyVisualizer:
                     if start_idx < len(target_series.offsets) and end_idx < len(target_series.offsets):
                         start_x = target_series.offsets[start_idx]
                         end_x = target_series.offsets[end_idx]
-                        ax2.fill_betweenx(y=[0, np.max(log_filtered) * 1.1],
+                        ax4.fill_betweenx(y=[0, np.max(log_filtered) * 1.1],
                                          x1=start_x, x2=end_x,
                                          color='red', alpha=0.15)
 
-        ax2.set_ylabel('log(сила)')
-        ax2.set_xlabel('Смещение')
-        ax2.grid(True, alpha=0.2)
+        ax4.set_ylabel('log(сила)')
+        ax4.set_xlabel('Смещение')
+        ax4.grid(True, alpha=0.2)
+        ax4.set_title(f'Сила скачков (Window Size: {target_series.window_size})')
 
         plt.tight_layout()
 
         if save_path:
+            save_path = self._get_unique_filename(save_path)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
         return fig
+
+    def _get_unique_filename(self, filepath: str) -> str:
+        path = Path(filepath)
+        if not path.exists():
+            return filepath
+
+        stem = path.stem
+        suffix = path.suffix
+        directory = path.parent
+
+        counter = 1
+        while True:
+            new_name = f"{stem}_{counter}{suffix}"
+            new_path = directory / new_name
+            if not new_path.exists():
+                return str(new_path)
+            counter += 1
 
     def _find_contiguous_regions(self, mask: np.ndarray) -> List[Tuple[int, int]]:
         regions = []
@@ -228,10 +270,15 @@ def main():
         output_dir = Path(args.output)
         output_dir.mkdir(exist_ok=True, parents=True)
 
-        plot_path = output_dir / "entropy_analysis.png"
+        # Создаем базовое имя файла
+        base_filename = "entropy_analysis.png"
+        plot_path = output_dir / base_filename
+
+        # Получаем уникальное имя файла через визуализатор
+        unique_plot_path = visualizer._get_unique_filename(str(plot_path))
 
         fig = visualizer.plot_detection(
-            save_path=str(plot_path),
+            save_path=unique_plot_path,
             threshold_factor=args.threshold,
             show_stats=not args.no_stats
         )

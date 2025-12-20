@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
     config.window_sizes = NULL;
     config.num_windows = 0;
     config.detailed_mode = 0; // Fast mode by default
-    config.max_points_per_window = 10000;
+    config.max_points_per_window = 50000;
     config.buffer_size = 1024 * 1024; // 1 MB default
 
     for (int i = 2; i < argc; i++) {
