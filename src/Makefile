@@ -15,7 +15,4 @@ debug: $(TARGET)
 clean:
 	rm -f $(TARGET) *.o
 
-install: $(TARGET)
-	cp $(TARGET) /usr/local/bin/
-
-.PHONY: all debug clean install
+.PHONY: all debug clean

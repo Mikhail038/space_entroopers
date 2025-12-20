@@ -90,174 +90,6 @@ static double max_entropy_for_window(size_t window_size) {
     }
 }
 
-// Новый фильтр с окном 10 точек и логарифмированием
-static double apply_log_window_filter(const double *values, size_t index, size_t total) {
-    const int HALF_WINDOW = WINDOW_HALF_SIZE; // 10 точек слева и 10 справа
-    
-    // Нужно минимум 2*HALF_WINDOW + 1 точек для полного окна
-    if (total < 2 * HALF_WINDOW + 1) {
-        // Если точек недостаточно, используем меньший размер окна
-        int available_half = (total - 1) / 2;
-        if (available_half == 0) {
-            // Если совсем мало точек, возвращаем 0
-            return 0.0;
-        }
-        
-        // Используем доступный размер окна
-        int start_idx = index - available_half;
-        int end_idx = index + available_half;
-        
-        if (start_idx < 0) {
-            end_idx += -start_idx;
-            start_idx = 0;
-        }
-        if (end_idx >= (int)total) {
-            start_idx -= (end_idx - total + 1);
-            end_idx = total - 1;
-        }
-        if (start_idx < 0) start_idx = 0;
-        
-        // Вычисляем среднее в левой и правой половинах
-        double left_sum = 0.0, right_sum = 0.0;
-        int left_count = 0, right_count = 0;
-        
-        for (int i = start_idx; i < index; i++) {
-            if (i >= 0 && i < (int)total) {
-                left_sum += values[i];
-                left_count++;
-            }
-        }
-        
-        for (int i = index + 1; i <= end_idx; i++) {
-            if (i >= 0 && i < (int)total) {
-                right_sum += values[i];
-                right_count++;
-            }
-        }
-        
-        if (left_count == 0 || right_count == 0) {
-            return 0.0;
-        }
-        
-        double left_avg = left_sum / left_count;
-        double right_avg = right_sum / right_count;
-        double diff = right_avg - left_avg;
-        
-        // Применяем логарифмирование с сохранением знака
-        double abs_diff = fabs(diff);
-        if (abs_diff < 1e-10) {
-            return 0.0;
-        }
-        
-        // Логарифмируем разность (усиливаем большие скачки)
-        // Используем log1p для устойчивости: log(1 + x)
-        double log_value = log1p(abs_diff * 100.0); // Масштабируем для усиления
-        
-        // Возвращаем со знаком исходной разности
-        return (diff >= 0) ? log_value : -log_value;
-    }
-    
-    // Проверяем, что у нас достаточно точек для полного окна
-    if (index < HALF_WINDOW || index >= total - HALF_WINDOW) {
-        // Если точка слишком близко к краю, используем асимметричное окно
-        int left_half = index;
-        int right_half = total - index - 1;
-        
-        if (left_half > HALF_WINDOW) left_half = HALF_WINDOW;
-        if (right_half > HALF_WINDOW) right_half = HALF_WINDOW;
-        
-        if (left_half == 0 || right_half == 0) {
-            return 0.0;
-        }
-        
-        double left_sum = 0.0, right_sum = 0.0;
-        
-        for (int i = 1; i <= left_half; i++) {
-            left_sum += values[index - i];
-        }
-        
-        for (int i = 1; i <= right_half; i++) {
-            right_sum += values[index + i];
-        }
-        
-        double left_avg = left_sum / left_half;
-        double right_avg = right_sum / right_half;
-        double diff = right_avg - left_avg;
-        
-        // Применяем логарифмирование
-        double abs_diff = fabs(diff);
-        if (abs_diff < 1e-10) {
-            return 0.0;
-        }
-        
-        double log_value = log1p(abs_diff * 100.0);
-        return (diff >= 0) ? log_value : -log_value;
-    }
-    
-    // Полное окно: 10 точек слева, 10 точек справа
-    double left_sum = 0.0;
-    for (int i = 1; i <= HALF_WINDOW; i++) {
-        left_sum += values[index - i];
-    }
-    
-    double right_sum = 0.0;
-    for (int i = 1; i <= HALF_WINDOW; i++) {
-        right_sum += values[index + i];
-    }
-    
-    double left_avg = left_sum / HALF_WINDOW;
-    double right_avg = right_sum / HALF_WINDOW;
-    double diff = right_avg - left_avg;
-    
-    // Логарифмируем с сохранением знака
-    double abs_diff = fabs(diff);
-    if (abs_diff < 1e-10) {
-        return 0.0;
-    }
-    
-    // Усиливаем большие скачки логарифмом
-    // log(1 + 100*x) дает:
-    // x=0.1 -> log(11) ≈ 2.40
-    // x=0.3 -> log(31) ≈ 3.43  
-    // x=0.5 -> log(51) ≈ 3.93
-    // x=0.9 -> log(91) ≈ 4.51
-    // Разница между 0.1 и 0.9 примерно в 1.88 раз, но абсолютные значения больше
-    
-    double log_value = log1p(abs_diff * 100.0);
-    return (diff >= 0) ? log_value : -log_value;
-}
-
-// Альтернативный вариант: фильтр с экспоненциальным усилением
-static double apply_exp_window_filter(const double *values, size_t index, size_t total) {
-    const int HALF_WINDOW = 10;
-    
-    if (index < HALF_WINDOW || index >= total - HALF_WINDOW) {
-        return 0.0;
-    }
-    
-    double left_sum = 0.0, right_sum = 0.0;
-    
-    for (int i = 1; i <= HALF_WINDOW; i++) {
-        left_sum += values[index - i];
-        right_sum += values[index + i];
-    }
-    
-    double left_avg = left_sum / HALF_WINDOW;
-    double right_avg = right_sum / HALF_WINDOW;
-    double diff = right_avg - left_avg;
-    
-    // Экспоненциальное усиление: e^(k*x) - 1
-    // При k=10: e^(10*0.1)=e^1≈2.718, e^(10*0.9)=e^9≈8103
-    // Разница огромная!
-    const double K = 5.0; // Коэффициент усиления
-    
-    if (diff >= 0) {
-        return exp(K * diff) - 1.0;
-    } else {
-        return -(exp(-K * diff) - 1.0);
-    }
-}
-
 // Комбинированный фильтр: логарифмирование + квадратичное усиление
 static double apply_combined_filter(const double *values, size_t index, size_t total) {
     const int HALF_WINDOW = 10;
@@ -307,16 +139,10 @@ static double apply_combined_filter(const double *values, size_t index, size_t t
     return (diff >= 0) ? result : -result;
 }
 
-// Основной фильтр (выбираем комбинированный)
-static double apply_main_filter(const double *values, size_t index, size_t total) {
-    return apply_combined_filter(values, index, total);
-}
-
 static int process_block_for_context(WindowContext *ctx,
                                     const uint8_t *data,
                                     size_t data_size,
-                                    size_t block_start,
-                                    FILE *output) {
+                                    size_t block_start) {
     double max_entropy = max_entropy_for_window(ctx->window_size);
 
     if (ctx->current_offset == 0) {
@@ -413,7 +239,7 @@ static void write_filtered_data(WindowContext *ctx, FILE *output) {
         double normalized_entropy = ctx->entropy_norm_buffer[i];
         
         // Применяем комбинированный фильтр
-        double filtered_value = apply_main_filter(ctx->entropy_norm_buffer, i, ctx->buffer_size);
+        double filtered_value = apply_combined_filter(ctx->entropy_norm_buffer, i, ctx->buffer_size);
         
         // Абсолютное значение
         double filtered_abs = fabs(filtered_value);
@@ -542,7 +368,7 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
 
         for (size_t i = 0; i < num_contexts; i++) {
             if (contexts[i]->points_written < contexts[i]->points_to_write) {
-                process_block_for_context(contexts[i], buffer, bytes_read, total_bytes_read, output_file);
+                process_block_for_context(contexts[i], buffer, bytes_read, total_bytes_read);
             }
         }
 
