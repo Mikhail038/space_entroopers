@@ -7,10 +7,9 @@
 
 #define MIN_WINDOW_SIZE 16
 #define MAX_WINDOW_SIZE 1024
-#define DEFAULT_BUFFER_SIZE (1024 * 1024) // 1 MB buffer
-#define WINDOW_HALF_SIZE 10  // Будем использовать 10 точек слева и 10 справа
+#define DEFAULT_BUFFER_SIZE (1024 * 1024 * 4)
+#define WINDOW_HALF_SIZE 10
 
-// Structure for temporary computation data
 typedef struct {
     size_t window_size;
     size_t step;
@@ -19,14 +18,12 @@ typedef struct {
     size_t points_written;
     size_t points_to_write;
     
-    // Buffers for filtering
     double *entropy_norm_buffer;
     size_t *offset_buffer;
     size_t buffer_capacity;
     size_t buffer_size;
 } WindowContext;
 
-// Initialize window context
 static WindowContext *create_window_context(size_t window_size, size_t step, size_t max_points) {
     WindowContext *ctx = (WindowContext*)calloc(1, sizeof(WindowContext));
     if (!ctx) return NULL;
@@ -38,7 +35,6 @@ static WindowContext *create_window_context(size_t window_size, size_t step, siz
     ctx->points_written = 0;
     ctx->points_to_write = max_points;
     
-    // Initialize buffers
     ctx->buffer_capacity = max_points > 0 ? max_points : 1000;
     ctx->entropy_norm_buffer = (double*)malloc(ctx->buffer_capacity * sizeof(double));
     ctx->offset_buffer = (size_t*)malloc(ctx->buffer_capacity * sizeof(size_t));
@@ -55,7 +51,6 @@ static WindowContext *create_window_context(size_t window_size, size_t step, siz
     return ctx;
 }
 
-// Free context
 static void free_window_context(WindowContext *ctx) {
     if (ctx) {
         free(ctx->histogram);
@@ -65,7 +60,6 @@ static void free_window_context(WindowContext *ctx) {
     }
 }
 
-// Fixed entropy_from_histogram function
 static double entropy_from_histogram(const uint32_t *hist, size_t window_size) {
     double entropy = 0.0;
     double inv_window_size = 1.0 / window_size;
@@ -81,20 +75,18 @@ static double entropy_from_histogram(const uint32_t *hist, size_t window_size) {
     return entropy;
 }
 
-// Compute maximum possible entropy for given window
 static double max_entropy_for_window(size_t window_size) {
     if (window_size <= 256) {
         return log2((double)window_size);
     } else {
-        return 8.0; // log2(256)
+        return 8.0;
     }
 }
 
-// Комбинированный фильтр: логарифмирование + квадратичное усиление
 static double apply_combined_filter(const double *values, size_t index, size_t total) {
     const int HALF_WINDOW = 10;
     
-    if (total < 21) { // Нужно минимум 21 точка для полного окна
+    if (total < 21) {
         return 0.0;
     }
     
@@ -102,12 +94,10 @@ static double apply_combined_filter(const double *values, size_t index, size_t t
         return 0.0;
     }
     
-    // Вычисляем средние с весами (близкие точки важнее)
     double left_weighted = 0.0, right_weighted = 0.0;
     double left_weight_sum = 0.0, right_weight_sum = 0.0;
     
     for (int i = 1; i <= HALF_WINDOW; i++) {
-        // Вес уменьшается с расстоянием (экспоненциально)
         double weight = exp(-i / 3.0);
         
         left_weighted += values[index - i] * weight;
@@ -121,21 +111,15 @@ static double apply_combined_filter(const double *values, size_t index, size_t t
     double right_avg = right_weighted / right_weight_sum;
     double diff = right_avg - left_avg;
     
-    // Комбинированное преобразование:
-    // 1. Берем абсолютное значение
     double abs_diff = fabs(diff);
     
     if (abs_diff < 1e-10) {
         return 0.0;
     }
     
-    // 2. Возводим в степень для усиления больших скачков
-    double powered = pow(abs_diff, 1.5); // Степень 1.5 дает хорошее усиление
-    
-    // 3. Логарифмируем для сжатия динамического диапазона
+    double powered = pow(abs_diff, 1.5);
     double result = log1p(powered * 10.0);
     
-    // 4. Возвращаем со знаком
     return (diff >= 0) ? result : -result;
 }
 
@@ -238,10 +222,8 @@ static void write_filtered_data(WindowContext *ctx, FILE *output) {
     for (size_t i = 0; i < ctx->buffer_size; i++) {
         double normalized_entropy = ctx->entropy_norm_buffer[i];
         
-        // Применяем комбинированный фильтр
         double filtered_value = apply_combined_filter(ctx->entropy_norm_buffer, i, ctx->buffer_size);
         
-        // Абсолютное значение
         double filtered_abs = fabs(filtered_value);
         
         fprintf(output, "%zu,%zu,%zu,%.6f,%.6f,%.6f\n", 
@@ -254,7 +236,6 @@ static void write_filtered_data(WindowContext *ctx, FILE *output) {
     }
 }
 
-// Main streaming analysis function
 int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE *output_file) {
     if (!filename || !config || !output_file) {
         return -1;
@@ -262,16 +243,12 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
 
     FILE *input_file = fopen(filename, "rb");
     if (!input_file) {
-        perror("Error opening input file");
         return -1;
     }
 
     fseek(input_file, 0, SEEK_END);
     size_t file_size = ftell(input_file);
     fseek(input_file, 0, SEEK_SET);
-
-    printf("Analyzing file: %s\n", filename);
-    printf("File size: %zu bytes\n", file_size);
 
     size_t buffer_size = config->buffer_size > 0 ? config->buffer_size : DEFAULT_BUFFER_SIZE;
     buffer_size = (buffer_size / 4096) * 4096;
@@ -281,7 +258,6 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
 
     fprintf(output_file, "window_size,step,offset,entropy_norm,filtered_value,filtered_abs\n");
 
-    // Create contexts
     for (size_t w_idx = 0; w_idx < config->num_windows; w_idx++) {
         size_t window_size = config->window_sizes[w_idx];
         if (window_size > file_size) continue;
@@ -328,18 +304,13 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
     }
 
     if (num_contexts == 0) {
-        printf("No valid window/step combinations\n");
         fclose(input_file);
         free(contexts);
         return 0;
     }
 
-    printf("Created %zu analysis contexts\n", num_contexts);
-    printf("Using combined filter (10-point window + logarithmic enhancement)\n");
-
     uint8_t *buffer = (uint8_t*)malloc(buffer_size);
     if (!buffer) {
-        perror("Error allocating buffer");
         for (size_t i = 0; i < num_contexts; i++) {
             free_window_context(contexts[i]);
         }
@@ -360,7 +331,6 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
         size_t bytes_read = fread(buffer, 1, bytes_to_read, input_file);
         if (bytes_read == 0) {
             if (ferror(input_file)) {
-                perror("Error reading file");
                 break;
             }
             break;
@@ -374,17 +344,8 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
 
         total_bytes_read += bytes_read;
         block_number++;
-
-        if (block_number % 10 == 0) {
-            printf("Processed: %.1f MB / %.1f MB\r", total_bytes_read / (1024.0 * 1024.0),
-                   file_size / (1024.0 * 1024.0));
-            fflush(stdout);
-        }
     }
 
-    printf("\nAnalysis complete. Processed %zu blocks\n", block_number);
-
-    printf("Applying combined filter (10-point window + log enhancement)...\n");
     for (size_t i = 0; i < num_contexts; i++) {
         write_filtered_data(contexts[i], output_file);
     }
@@ -399,7 +360,6 @@ int analyze_file_stream(const char *filename, const AnalysisConfig *config, FILE
     return 0;
 }
 
-// Automatic window size selection
 size_t* auto_window_sizes(size_t file_size, size_t *num_sizes) {
     size_t max_window = file_size / 4;
     if (max_window > MAX_WINDOW_SIZE) max_window = MAX_WINDOW_SIZE;
